@@ -1,0 +1,86 @@
+#include <Arduino.h>
+#include "TensorFlowLite_ESP32.h" 
+#include "model_data.h"          
+#include "esp_i2s.h"             
+#define LED_PIN 2 
+constexpr int kTensorArenaSize = 16 * 1024; 
+uint8_t tensor_arena[kTensorArenaSize];
+tflite::ErrorReporter* error_reporter = nullptr;
+tflite::MicroInterpreter* interpreter = nullptr;
+tflite::Model* model = nullptr;
+
+constexpr int kAudioSampleRate = 16000; 
+int16_t audio_buffer[16000];            
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+
+  model = tflite::GetModel(model_data);
+  if (model->version() != TFLITE_SCHEMA_VERSION) {
+    Serial.println("Model schema version mismatch!");
+    while (1);
+  }
+
+  static tflite::AllOpsResolver resolver;
+  static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
+  interpreter = &static_interpreter;
+  interpreter->AllocateTensors();
+
+  i2s_config_t i2s_config = {
+    .mode = I2S_MODE_MASTER | I2S_MODE_RX,
+    .sample_rate = kAudioSampleRate,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 1024,
+    .use_apll = false
+  }
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, NULL); 
+
+  Serial.println("Speech recognition system ready!");
+}
+
+void loop() {
+
+  size_t bytes_read;
+  i2s_read(I2S_NUM_0, audio_buffer, sizeof(audio_buffer), &bytes_read, portMAX_DELAY);
+
+  float mfcc_input[49]; 
+  preprocess_audio(audio_buffer, mfcc_input);
+
+  float* input = interpreter->input(0)->data.f;
+  memcpy(input, mfcc_input, sizeof(mfcc_input));
+  interpreter->Invoke();
+
+  float* output = interpreter->output(0)->data.f;
+  int command_id = get_max_score_index(output, 2); 
+  if (command_id == 0) {
+    Serial.println("Command: ON");
+    digitalWrite(LED_PIN, HIGH); 
+  } else if (command_id == 1) {
+    Serial.println("Command: OFF");
+    digitalWrite(LED_PIN, LOW); 
+  } else {
+    Serial.println("Command: Unknown");
+  }
+
+  delay(100); 
+}
+
+void preprocess_audio(int16_t* audio_buffer, float* mfcc_input) {
+
+}
+
+int get_max_score_index(float* scores, int num_commands) {
+  int max_index = 0;
+  for (int i = 1; i < num_commands; i++) {
+    if (scores[i] > scores[max_index]) {
+      max_index = i;
+    }
+  }
+  return max_index;
+}
